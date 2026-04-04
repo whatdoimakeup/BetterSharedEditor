@@ -1,0 +1,23 @@
+{
+  "token_hmac_secret_key": "secret-hmac-key",
+  "api_key": "secret-api-key",
+  "admin_password": "admin-password",
+  "admin_secret": "admin-secret",
+  "client_insecure": true,
+  "client_max_message_size": 131072,
+  "log_level": "debug",
+  "port": 8000,
+  "allowed_origins": ["*"],
+  "proxy_rpc_endpoint": "http://django:8000/api/centrifugo/rpc/",
+  "proxy_rpc_timeout": "5s",
+  "namespaces": [
+    {
+      "name": "rooms",
+      "allow_subscribe_for_client": true,
+      "force_recovery": true,
+      "history_size": 1000,
+      "history_ttl": "5m",
+      "presence": true
+    }
+  ]
+}

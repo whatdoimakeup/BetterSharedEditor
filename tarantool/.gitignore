@@ -1,0 +1,6 @@
+# Tarantool data
+*.snap
+*.xlog
+*.vylog
+*/
+__pycache__/

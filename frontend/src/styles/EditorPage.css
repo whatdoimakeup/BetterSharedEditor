@@ -1,0 +1,216 @@
+/* Editor Page Styles */
+
+.editor-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: var(--bg-primary);
+}
+
+/* Editor Header */
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  min-height: 48px;
+}
+
+.editor-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.room-title {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.editor-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+/* Connection Status */
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+}
+
+.status-disconnected .status-dot {
+  background-color: var(--text-secondary);
+}
+
+.status-connecting .status-dot {
+  background-color: var(--warning);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.status-connected .status-dot {
+  background-color: var(--success);
+}
+
+.status-error .status-dot {
+  background-color: var(--error);
+}
+
+.status-disconnected .status-label {
+  color: var(--text-secondary);
+}
+
+.status-connecting .status-label {
+  color: var(--warning);
+}
+
+.status-connected .status-label {
+  color: var(--success);
+}
+
+.status-error .status-label {
+  color: var(--error);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* User List */
+.user-list {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.user-count {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.user-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background-color: var(--accent);
+  color: white;
+  border-radius: 50%;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.user-items {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  max-width: 300px;
+  overflow-x: auto;
+}
+
+.user-item {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  background-color: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.user-current {
+  border: 1px solid var(--accent);
+}
+
+.user-empty {
+  color: var(--text-secondary);
+  background: none;
+  padding: 0.25rem;
+}
+
+.user-color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.user-name {
+  white-space: nowrap;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Error Banner */
+.error-banner {
+  background-color: var(--error);
+  color: white;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background-color: var(--bg-primary);
+  color: var(--error);
+  font-size: 1.125rem;
+}
+
+/* Editor Container */
+.editor-container {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Remote Selection/Cursor Styles for Monaco Editor (y-monaco) */
+:global(.yRemoteSelection) {
+  background-color: rgba(137, 180, 250, 0.3);
+  border-left: 2px solid #89b4fa;
+}
+
+:global(.yRemoteSelectionHead) {
+  position: absolute;
+  border-left: 2px solid #89b4fa;
+  border-top: 2px solid #89b4fa;
+  border-bottom: 2px solid #89b4fa;
+  margin-left: -1px;
+}
+
+/* Save Status Indicator */
+.save-status {
+  font-size: 0.625rem;
+  color: var(--text-secondary);
+  padding: 0.25rem 0.5rem;
+}
+
+.save-status.saving {
+  color: var(--warning);
+}
+
+.save-status.saved {
+  color: var(--success);
+}

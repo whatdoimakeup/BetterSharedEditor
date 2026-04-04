@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  tarantool:
+    image: tarantool/tarantool:2.11
+    container_name: bse-tarantool
+    ports:
+      - "3301:3301"
+    volumes:
+      - ./tarantool:/opt/tarantool
+      - tarantool_data:/var/lib/tarantool
+    command: tarantool /opt/tarantool/init.lua
+
+  centrifugo:
+    image: centrifugo/centrifugo:v5
+    container_name: bse-centrifugo
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./centrifugo:/centrifugo
+    command: centrifugo -c config.json
+    depends_on:
+      - django
+
+  django:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bse-django
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - TARANTOOL_HOST=tarantool
+      - TARANTOOL_PORT=3301
+      - TARANTOOL_USER=admin
+      - TARANTOOL_PASSWORD=password
+      - CENTRIFUGO_API_URL=http://centrifugo:8000
+      - CENTRIFUGO_API_KEY=secret-api-key
+      - CENTRIFUGO_HMAC_KEY=secret-hmac-key
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+
+volumes:
+  tarantool_data:
