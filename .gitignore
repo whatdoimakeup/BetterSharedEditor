@@ -8,6 +8,9 @@ dist/
 build/
 *.egg-info/
 
+# Go build output
+go-rpc/go-rpc
+
 # Database
 db.sqlite3
 

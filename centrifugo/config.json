@@ -8,7 +8,7 @@
   "log_level": "debug",
   "port": 8000,
   "allowed_origins": ["*"],
-  "proxy_rpc_endpoint": "http://django:8000/api/centrifugo/rpc/",
+  "proxy_rpc_endpoint": "http://go-rpc:8002/rpc",
   "proxy_rpc_timeout": "5s",
   "namespaces": [
     {

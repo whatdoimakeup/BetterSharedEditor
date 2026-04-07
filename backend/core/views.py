@@ -120,8 +120,12 @@ class RoomStateView(APIView):
     """Get or update the persisted Yjs state of a room."""
 
     def get(self, request, room_id):
-        """Return room content and Yjs state (base64 encoded)."""
-        room = tarantool_client.get_room(room_id)
+        """Return room content and Yjs state (base64 encoded).
+
+        Uses ``_get_room_snapshot`` so any pending raw updates written by the
+        Go RPC service are merged in before the state is returned to the client.
+        """
+        room, current_yjs_state, current_content = _get_room_snapshot(room_id)
         if not room:
             return Response(
                 {"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND
@@ -129,18 +133,10 @@ class RoomStateView(APIView):
 
         from .services.yjs import encode_yjs_state
 
-        cached_state, cached_content = room_state_cache.get_room_state(room_id)
-        current_content = (
-            cached_content if cached_content is not None else room.get("content") or ""
-        )
-        current_yjs_state = (
-            cached_state if cached_state is not None else room.get("yjs_state")
-        )
-
         response_data = {
             "id": room["id"],
             "name": room["name"],
-            "content": current_content,
+            "content": current_content or "",
         }
 
         if current_yjs_state:
@@ -186,7 +182,15 @@ class RoomStateView(APIView):
 
 
 def _get_room_snapshot(room_id: int):
-    """Get current room state from Redis first, then fall back to Tarantool."""
+    """Get current room state from Redis first, then fall back to Tarantool.
+
+    When the Go RPC service is handling updates it stores raw Yjs bytes in a
+    Redis pending list instead of merging them immediately.  This function
+    drains that list and applies all pending updates via pycrdt so the
+    returned state is always up-to-date, while keeping the hot path (every
+    keystroke) in Go and limiting expensive Python CRDT merges to moments
+    when the full state is actually needed.
+    """
     room = tarantool_client.get_room(room_id)
     if not room:
         return None, None, None
@@ -196,9 +200,45 @@ def _get_room_snapshot(room_id: int):
         existing_state = room.get("yjs_state")
         existing_content = room.get("content") or ""
         room_state_cache.warm_room_state(room_id, existing_state, existing_content)
-        return room, existing_state, existing_content
+        base_state = existing_state
+        base_content = existing_content
+    else:
+        base_state = cached_state
+        base_content = cached_content or ""
 
-    return room, cached_state, cached_content or ""
+    # Drain any raw updates written by the Go RPC service and merge them.
+    pending = room_state_cache.get_and_clear_pending_updates(room_id)
+    if pending:
+        from .services.yjs import apply_yjs_update
+
+        try:
+            state = base_state
+            content = base_content
+            for update in pending:
+                state, content = apply_yjs_update(state, update)
+
+            # Cache the freshly merged state and flush it to Tarantool so it
+            # survives a Redis eviction.
+            room_state_cache.save_room_state(room_id, state, content)
+            tarantool_client.update_room_content(
+                room_id, content=content, yjs_state=state
+            )
+            logger.info(
+                "Merged %d pending Go-RPC updates for room %s and flushed to DB",
+                len(pending),
+                room_id,
+            )
+            return room, state, content
+        except Exception as e:
+            logger.error(
+                "Failed to merge %d pending updates for room %s: %s",
+                len(pending),
+                room_id,
+                e,
+            )
+            # Fall through and return the last known good state.
+
+    return room, base_state, base_content
 
 
 @csrf_exempt

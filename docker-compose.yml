@@ -15,6 +15,21 @@ services:
     ports:
       - "6379:6379"
 
+  go-rpc:
+    build:
+      context: ./go-rpc
+      dockerfile: Dockerfile
+    container_name: bse-go-rpc
+    ports:
+      - "8002:8002"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CENTRIFUGO_API_URL=http://centrifugo:8000
+      - CENTRIFUGO_API_KEY=secret-api-key
+      - PORT=8002
+
   centrifugo:
     image: centrifugo/centrifugo:v5
     container_name: bse-centrifugo
@@ -24,7 +39,7 @@ services:
       - ./centrifugo:/centrifugo
     command: centrifugo -c config.json
     depends_on:
-      - django
+      - go-rpc
 
   django:
     build:
