@@ -4,6 +4,7 @@ Views for the core app.
 
 import json
 import logging
+from datetime import datetime, timezone
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -13,6 +14,7 @@ from rest_framework.views import APIView
 
 from .services.tarantool import tarantool_client
 from .services.centrifugo import CentrifugoClient
+from .services.redis_state import room_state_cache
 
 centrifugo_client = CentrifugoClient()
 
@@ -109,6 +111,8 @@ class RoomDetailView(APIView):
                 {"error": "Failed to delete room"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        room_state_cache.clear_room_state(room_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -125,14 +129,22 @@ class RoomStateView(APIView):
 
         from .services.yjs import encode_yjs_state
 
+        cached_state, cached_content = room_state_cache.get_room_state(room_id)
+        current_content = (
+            cached_content if cached_content is not None else room.get("content") or ""
+        )
+        current_yjs_state = (
+            cached_state if cached_state is not None else room.get("yjs_state")
+        )
+
         response_data = {
             "id": room["id"],
             "name": room["name"],
-            "content": room.get("content") or "",
+            "content": current_content,
         }
 
-        if room.get("yjs_state"):
-            response_data["yjs_state"] = encode_yjs_state(room["yjs_state"])
+        if current_yjs_state:
+            response_data["yjs_state"] = encode_yjs_state(current_yjs_state)
         else:
             response_data["yjs_state"] = None
 
@@ -164,12 +176,29 @@ class RoomStateView(APIView):
                 {"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
+        room_state_cache.warm_room_state(room_id, yjs_state_bytes, content)
         return Response({"status": "saved", "updated_at": room["updated_at"]})
 
 
 # ============================================================
 # Centrifugo RPC proxy
 # ============================================================
+
+
+def _get_room_snapshot(room_id: int):
+    """Get current room state from Redis first, then fall back to Tarantool."""
+    room = tarantool_client.get_room(room_id)
+    if not room:
+        return None, None, None
+
+    cached_state, cached_content = room_state_cache.get_room_state(room_id)
+    if cached_state is None and cached_content is None:
+        existing_state = room.get("yjs_state")
+        existing_content = room.get("content") or ""
+        room_state_cache.warm_room_state(room_id, existing_state, existing_content)
+        return room, existing_state, existing_content
+
+    return room, cached_state, cached_content or ""
 
 
 @csrf_exempt
@@ -200,7 +229,7 @@ def centrifugo_rpc(request):
     if not room_id or not update_b64:
         return JsonResponse({"error": "Missing room_id or data"}, status=400)
 
-    from .services.yjs import decode_yjs_state, encode_yjs_state, apply_yjs_update
+    from .services.yjs import decode_yjs_state, apply_yjs_update
 
     # Decode incoming update
     try:
@@ -209,12 +238,10 @@ def centrifugo_rpc(request):
         logger.error("Failed to decode Yjs update: %s", e)
         return JsonResponse({"error": "Invalid update encoding"}, status=400)
 
-    # Load existing room state
-    room = tarantool_client.get_room(room_id)
+    # Load the hot room state from Redis first, then fall back to Tarantool
+    room, existing_state, _ = _get_room_snapshot(room_id)
     if not room:
         return JsonResponse({"error": "Room not found"}, status=404)
-
-    existing_state = room.get("yjs_state")  # bytes or None
 
     # Apply update to CRDT state via pycrdt
     try:
@@ -223,22 +250,33 @@ def centrifugo_rpc(request):
         logger.error("Failed to merge Yjs update for room %s: %s", room_id, e)
         return JsonResponse({"error": "Failed to merge update"}, status=500)
 
-    # Persist merged state
-    updated_room = tarantool_client.update_room_content(
-        room_id, content=text_content, yjs_state=new_state_bytes
+    cache_update_count = room_state_cache.save_room_state(
+        room_id, new_state_bytes, text_content
     )
-    if not updated_room:
-        return JsonResponse({"error": "Failed to save state"}, status=500)
 
-    # Broadcast the original delta to all channel subscribers
+    # Broadcast the original delta to all channel subscribers immediately
     centrifugo_client.publish_to_room(
         room_id,
         {
-            "type": "yjs-update-b64",
+            "type": "yjs-update",
             "senderId": sender_id,
             "data": update_b64,
         },
     )
+
+    # Persist to DB every 10th request, or every request if Redis is unavailable.
+    if cache_update_count is None or cache_update_count % 10 == 0:
+        updated_room = tarantool_client.update_room_content(
+            room_id, content=text_content, yjs_state=new_state_bytes
+        )
+        if not updated_room:
+            return JsonResponse({"error": "Failed to save state"}, status=500)
+
+        logger.info(
+            "Flushed room %s from Redis cache to DB on update #%s",
+            room_id,
+            cache_update_count if cache_update_count is not None else "fallback",
+        )
 
     return JsonResponse({"result": {}})
 
@@ -266,7 +304,9 @@ class RoomUploadUpdateView(APIView):
         yjs_state_b64 = request.data.get("yjs_state_b64")
         sender_id = request.data.get("sender_id", "")
 
-        logger.info(f"[upload-update] Received upload from sender={sender_id[:8]}... room_id={room_id} size_b64={len(yjs_state_b64) if yjs_state_b64 else 0}")
+        logger.info(
+            f"[upload-update] Received upload from sender={sender_id[:8]}... room_id={room_id} size_b64={len(yjs_state_b64) if yjs_state_b64 else 0}"
+        )
 
         if not yjs_state_b64:
             return Response(
@@ -287,21 +327,26 @@ class RoomUploadUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Load existing room state
-        room = tarantool_client.get_room(room_id)
+        # Load the hot room state from Redis first, then fall back to Tarantool
+        room, existing_state, _ = _get_room_snapshot(room_id)
         if not room:
             logger.error(f"[upload-update] Room {room_id} not found")
             return Response(
                 {"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
-        existing_state = room.get("yjs_state")  # bytes or None
-        logger.info(f"[upload-update] Existing state: {len(existing_state) if existing_state else 0} bytes")
+        logger.info(
+            f"[upload-update] Existing state: {len(existing_state) if existing_state else 0} bytes"
+        )
 
         # Apply update to CRDT state via pycrdt
         try:
-            new_state_bytes, text_content = apply_yjs_update(existing_state, update_bytes)
-            logger.info(f"[upload-update] Applied update, new state: {len(new_state_bytes)} bytes, text: {len(text_content)} chars")
+            new_state_bytes, text_content = apply_yjs_update(
+                existing_state, update_bytes
+            )
+            logger.info(
+                f"[upload-update] Applied update, new state: {len(new_state_bytes)} bytes, text: {len(text_content)} chars"
+            )
         except Exception as e:
             logger.error("Failed to merge Yjs update for room %s: %s", room_id, e)
             return Response(
@@ -309,21 +354,15 @@ class RoomUploadUpdateView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Persist merged state
-        updated_room = tarantool_client.update_room_content(
-            room_id, content=text_content, yjs_state=new_state_bytes
+        cache_update_count = room_state_cache.save_room_state(
+            room_id, new_state_bytes, text_content
         )
-        if not updated_room:
-            logger.error(f"[upload-update] Failed to update room {room_id}")
-            return Response(
-                {"error": "Failed to save state"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
-        logger.info(f"[upload-update] Saved to DB, publishing room-resync-needed to all subscribers")
+        logger.info(
+            "[upload-update] Saved latest state to Redis, publishing room-resync-needed"
+        )
 
-        # Broadcast resync event to all OTHER clients on the channel
-        # They will fetch the new state from GET /rooms/:id/state/
+        # Broadcast resync event to all OTHER clients on the channel.
         centrifugo_client.publish_to_room(
             room_id,
             {
@@ -332,14 +371,32 @@ class RoomUploadUpdateView(APIView):
             },
         )
 
+        updated_at = datetime.now(timezone.utc).isoformat()
+
+        if cache_update_count is None or cache_update_count % 10 == 0:
+            updated_room = tarantool_client.update_room_content(
+                room_id, content=text_content, yjs_state=new_state_bytes
+            )
+            if not updated_room:
+                logger.error(f"[upload-update] Failed to update room {room_id}")
+                return Response(
+                    {"error": "Failed to save state"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            updated_at = updated_room["updated_at"]
+            logger.info(
+                "[upload-update] Flushed room %s from Redis cache to DB on update #%s",
+                room_id,
+                cache_update_count if cache_update_count is not None else "fallback",
+            )
+
         logger.info(f"[upload-update] Broadcast complete")
 
         return Response(
             {
                 "status": "ok",
                 "message": "Update applied and broadcast",
-                "updated_at": updated_room["updated_at"],
+                "updated_at": updated_at,
             }
         )
-
-
