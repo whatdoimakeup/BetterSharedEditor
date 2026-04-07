@@ -209,13 +209,10 @@ def _get_room_snapshot(room_id: int):
     # Drain any raw updates written by the Go RPC service and merge them.
     pending = room_state_cache.get_and_clear_pending_updates(room_id)
     if pending:
-        from .services.yjs import apply_yjs_update
+        from .services.yjs import apply_yjs_updates
 
         try:
-            state = base_state
-            content = base_content
-            for update in pending:
-                state, content = apply_yjs_update(state, update)
+            state, content = apply_yjs_updates(base_state, pending)
 
             # Cache the freshly merged state and flush it to Tarantool so it
             # survives a Redis eviction.

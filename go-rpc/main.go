@@ -95,7 +95,7 @@ func appendPendingUpdate(ctx context.Context, roomID int, update []byte) {
 
 // publishToRoom calls the Centrifugo HTTP API to publish a message to the
 // room's channel so that all connected subscribers receive the update.
-func publishToRoom(roomID int, data map[string]any) error {
+func publishToRoom(ctx context.Context, roomID int, data map[string]any) error {
 	payload := map[string]any{
 		"method": "publish",
 		"params": map[string]any{
@@ -109,7 +109,7 @@ func publishToRoom(roomID int, data map[string]any) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, centrifugoURL+"/api", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, centrifugoURL+"/api", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("new request: %w", err)
 	}
@@ -210,7 +210,7 @@ func handleRPC(w http.ResponseWriter, r *http.Request) {
 	appendPendingUpdate(ctx, roomID, updateBytes)
 
 	// 2. Broadcast the delta immediately to all room subscribers.
-	if err := publishToRoom(roomID, map[string]any{
+	if err := publishToRoom(ctx, roomID, map[string]any{
 		"type":     "yjs-update",
 		"senderId": senderID,
 		"data":     dataB64,

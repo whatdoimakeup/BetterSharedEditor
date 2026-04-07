@@ -27,12 +27,28 @@ def apply_yjs_update(existing_state: bytes | None, update: bytes) -> tuple[bytes
     Returns:
         (new_state_bytes, text_content) — full merged state and plaintext of 'content' key.
     """
+    return apply_yjs_updates(existing_state, [update])
+
+
+def apply_yjs_updates(
+    existing_state: bytes | None, updates: list[bytes]
+) -> tuple[bytes, str]:
+    """Apply multiple Yjs binary updates in a single Doc pass using pycrdt.
+
+    More efficient than calling :func:`apply_yjs_update` in a loop when
+    merging a batch of pending updates because the document is loaded only
+    once.
+
+    Returns:
+        (new_state_bytes, text_content) — full merged state and plaintext of 'content' key.
+    """
     from pycrdt import Doc, Text  # local import to keep startup fast
 
     doc = Doc()
     if existing_state:
         doc.apply_update(existing_state)
-    doc.apply_update(update)
+    for update in updates:
+        doc.apply_update(update)
 
     new_state = doc.get_update()
     text = doc.get("content", type=Text)
