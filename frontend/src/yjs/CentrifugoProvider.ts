@@ -5,13 +5,14 @@ import {
   type PublicationContext,
   type Subscription,
 } from "centrifuge";
+import { getRoomState, yjsUpdate } from "@/api/client";
 
 const DEFAULT_WS_URL =
   import.meta.env.VITE_CENTRIFUGO_WS_URL ??
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/connection/websocket`;
 
 interface YjsUpdateMessage {
-  type: "yjs-update";
+  type: "yjs-update" | "room-resync-needed";
   senderId: string;
   data: string;
 }
@@ -70,34 +71,68 @@ export function createCentrifugoProvider(
       return;
     }
 
-    centrifuge
-      .rpc("yjs_update", {
-        room_id: roomId,
-        data: encodeUpdateToBase64(update),
-        sender_id: localClientId,
-      })
-      .catch((error) => {
-        console.error("[CentrifugoProvider] Failed to publish update:", error);
-      });
+    if (update.byteLength > 50_000) {
+      yjsUpdate(roomId, encodeUpdateToBase64(update), localClientId).catch(
+        (error) => {
+          console.error(
+            "[CentrifugoProvider] Failed to send update via API:",
+            error,
+          );
+        },
+      );
+    } else {
+      centrifuge
+        .rpc("yjs_update", {
+          room_id: roomId,
+          data: encodeUpdateToBase64(update),
+          sender_id: localClientId,
+        })
+        .catch((error) => {
+          console.error(
+            "[CentrifugoProvider] Failed to publish update:",
+            error,
+          );
+        });
+    }
   };
 
   const handlePublication = (ctx: PublicationContext) => {
     const message = ctx.data as Partial<YjsUpdateMessage>;
 
-    if (
-      message.type !== "yjs-update" ||
-      typeof message.data !== "string" ||
-      message.senderId === localClientId
-    ) {
+    if (message.senderId === localClientId) {
+      console.log(message.data, message.senderId, localClientId);
+
       return;
     }
 
-    syncing = true;
-    try {
-      Y.applyUpdate(doc, decodeUpdateFromBase64(message.data), "centrifugo");
-      emit("sync");
-    } finally {
-      syncing = false;
+    if (message.type === "yjs-update") {
+      if (!message.data) return;
+
+      syncing = true;
+      try {
+        Y.applyUpdate(doc, decodeUpdateFromBase64(message.data), "centrifugo");
+        emit("sync");
+      } finally {
+        syncing = false;
+        return;
+      }
+    }
+
+    if (message.type === "room-resync-needed") {
+      getRoomState(roomId)
+        .then((state) => {
+          if (state.yjs_state) {
+            Y.applyUpdate(
+              doc,
+              decodeUpdateFromBase64(state.yjs_state),
+              "centrifugo",
+            );
+            emit("sync");
+          }
+        })
+        .finally(() => {
+          return;
+        });
     }
   };
 
