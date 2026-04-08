@@ -57,19 +57,32 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Database — SQLite for Django internals, Tarantool for rooms
+# Tarantool configuration
+# Prefer the explicit Compose container hostname to avoid Docker DNS ambiguity.
+TARANTOOL_HOST = os.environ.get("TARANTOOL_HOST", "tarantool")
+TARANTOOL_PORT = int(os.environ.get("TARANTOOL_PORT", "3301"))
+TARANTOOL_USER = os.environ.get("TARANTOOL_USER", "admin")
+TARANTOOL_PASSWORD = os.environ.get("TARANTOOL_PASSWORD", "password")
+TARANTOOL_CONN_MAX_AGE = int(os.environ.get("TARANTOOL_CONN_MAX_AGE", "3600"))
+
+# Database — SQLite for Django internals, Tarantool for room metadata via Django ORM
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
-    }
+    },
+    "tarantool": {
+        "ENGINE": "django_tarantool.backend",
+        "HOST": TARANTOOL_HOST,
+        "PORT": TARANTOOL_PORT,
+        "USER": TARANTOOL_USER,
+        "PASSWORD": TARANTOOL_PASSWORD,
+        "CONN_MAX_AGE": TARANTOOL_CONN_MAX_AGE,
+        "OPTIONS": {},
+    },
 }
 
-# Tarantool configuration
-TARANTOOL_HOST = os.environ.get("TARANTOOL_HOST", "localhost")
-TARANTOOL_PORT = int(os.environ.get("TARANTOOL_PORT", "3301"))
-TARANTOOL_USER = os.environ.get("TARANTOOL_USER", "admin")
-TARANTOOL_PASSWORD = os.environ.get("TARANTOOL_PASSWORD", "password")
+DATABASE_ROUTERS = ["core.db_routers.TarantoolRouter"]
 
 # Centrifugo configuration
 CENTRIFUGO_API_URL = os.environ.get("CENTRIFUGO_API_URL", "http://localhost:8001")

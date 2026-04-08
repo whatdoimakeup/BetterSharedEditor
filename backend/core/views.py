@@ -227,6 +227,10 @@ def centrifugo_rpc(request):
 
     cache_update_count = room_state_cache.save_room_state(room_id, new_state_bytes, text_content)
 
+    updated_room = tarantool_client.update_room_content(room_id, text_content)
+    if not updated_room:
+        return JsonResponse({"error": "Failed to update room preview"}, status=500)
+
     # Broadcast the original delta to all channel subscribers immediately
     centrifugo_client.publish_to_room(
         room_id,
@@ -322,6 +326,14 @@ class RoomUploadUpdateView(APIView):
             )
 
         cache_update_count = room_state_cache.save_room_state(room_id, new_state_bytes, text_content)
+
+        updated_room = tarantool_client.update_room_content(room_id, text_content)
+        if not updated_room:
+            logger.error(f"[upload-update] Failed to update room preview for {room_id}")
+            return Response(
+                {"error": "Failed to update room preview"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         logger.info("[upload-update] Saved latest state to Redis, publishing room-resync-needed")
 
