@@ -13,8 +13,8 @@ else
     box.schema.user.passwd('admin', 'password')
 end
 
--- Create admin user
-box.schema.user.grant('admin', 'super')
+-- Grant admin privileges idempotently
+box.schema.user.grant('admin', 'super', nil, nil, {if_not_exists = true})
 
 -- Wait until box is initialized
 box.once('init_v1', function()
@@ -39,14 +39,6 @@ box.once('init_v1', function()
     rooms:create_index('primary', {
         type = 'TREE',
         parts = {{field = 'id', type = 'unsigned'}},
-        if_not_exists = true,
-    })
-
-    -- Secondary index on name (for lookups)
-    rooms:create_index('name', {
-        type = 'TREE',
-        parts = {{field = 'name', type = 'string'}},
-        unique = false,
         if_not_exists = true,
     })
 
