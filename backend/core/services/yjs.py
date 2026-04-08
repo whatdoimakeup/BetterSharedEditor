@@ -21,6 +21,19 @@ def decode_yjs_state(state_b64: str) -> bytes:
     return base64.b64decode(state_b64)
 
 
+def get_text_from_state(state: bytes | None) -> str:
+    """Extract plain text content from a persisted Yjs document state."""
+    if not state:
+        return ""
+
+    from pycrdt import Doc, Text  # local import to keep startup fast
+
+    doc = Doc()
+    doc.apply_update(state)
+    text = doc.get("content", type=Text)
+    return str(text)
+
+
 def apply_yjs_update(existing_state: bytes | None, update: bytes) -> tuple[bytes, str]:
     """Apply a Yjs binary update on top of the existing state using pycrdt.
 

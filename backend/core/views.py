@@ -5,6 +5,7 @@ Views for the core app.
 import json
 import logging
 from datetime import datetime, timezone
+import time
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -15,10 +16,44 @@ from rest_framework.views import APIView
 from .services.tarantool import tarantool_client
 from .services.centrifugo import CentrifugoClient
 from .services.redis_state import room_state_cache
+from .services.s3 import s3_service
 
 centrifugo_client = CentrifugoClient()
 
 logger = logging.getLogger(__name__)
+
+
+def _load_state_from_storage(room_id: int) -> tuple[bytes | None, str]:
+    """Load current room state from Redis first, then fall back to S3."""
+    a = time.perf_counter()
+    cached_state, cached_content = room_state_cache.get_room_state(room_id)
+    b = time.perf_counter()
+    logger.info(f"Loaded state for room {room_id} from Redis in {(b - a) * 1000:.2f} ms")
+    if cached_state is not None or cached_content is not None:
+        return cached_state, cached_content or ""
+
+    from .services.yjs import get_text_from_state
+
+    state_bytes = s3_service.download_room_state(room_id)
+    if not state_bytes:
+        return None, ""
+
+    content = get_text_from_state(state_bytes)
+    room_state_cache.warm_room_state(room_id, state_bytes, content)
+    return state_bytes, content
+
+
+def _serialize_room(room: dict) -> dict:
+    """Build API room metadata without relying on Tarantool-stored state."""
+    current_state, current_content = _load_state_from_storage(room["id"])
+    return {
+        "id": room["id"],
+        "name": room["name"],
+        "created_at": room["created_at"],
+        "updated_at": room["updated_at"],
+        "has_content": bool(current_content),
+        "has_state": current_state is not None,
+    }
 
 
 # ============================================================
@@ -33,18 +68,7 @@ class RoomListCreateView(APIView):
         """Return list of all rooms."""
         try:
             rooms = tarantool_client.list_rooms()
-            # Strip binary state from list response
-            rooms_safe = [
-                {
-                    "id": r["id"],
-                    "name": r["name"],
-                    "created_at": r["created_at"],
-                    "updated_at": r["updated_at"],
-                    "has_content": bool(r.get("content")),
-                    "has_state": r.get("yjs_state") is not None,
-                }
-                for r in rooms
-            ]
+            rooms_safe = [_serialize_room(room) for room in rooms]
             return Response({"rooms": rooms_safe})
         except Exception as e:
             logger.error("Failed to list rooms: %s", e)
@@ -65,15 +89,7 @@ class RoomListCreateView(APIView):
         try:
             room_id = tarantool_client.get_next_id()
             room = tarantool_client.insert_room(room_id, name)
-            room_safe = {
-                "id": room["id"],
-                "name": room["name"],
-                "created_at": room["created_at"],
-                "updated_at": room["updated_at"],
-                "has_content": False,
-                "has_state": False,
-            }
-            return Response(room_safe, status=status.HTTP_201_CREATED)
+            return Response(_serialize_room(room), status=status.HTTP_201_CREATED)
         except Exception as e:
             logger.error("Failed to create room: %s", e)
             return Response(
@@ -91,15 +107,7 @@ class RoomDetailView(APIView):
         if not room:
             return Response({"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        room_safe = {
-            "id": room["id"],
-            "name": room["name"],
-            "created_at": room["created_at"],
-            "updated_at": room["updated_at"],
-            "has_content": bool(room.get("content")),
-            "has_state": room.get("yjs_state") is not None,
-        }
-        return Response(room_safe)
+        return Response(_serialize_room(room))
 
     def delete(self, request, room_id):
         """Delete a room."""
@@ -111,6 +119,7 @@ class RoomDetailView(APIView):
             )
 
         room_state_cache.clear_room_state(room_id)
+        s3_service.delete_room_state(room_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -125,12 +134,12 @@ class RoomStateView(APIView):
 
         from .services.yjs import encode_yjs_state
 
-        cached_state, cached_content = room_state_cache.get_room_state(room_id)
-        current_yjs_state = cached_state if cached_state is not None else room.get("yjs_state")
+        current_yjs_state, current_content = _load_state_from_storage(room_id)
 
         response_data = {
             "id": room["id"],
             "name": room["name"],
+            "content": current_content,
         }
 
         if current_yjs_state:
@@ -140,31 +149,6 @@ class RoomStateView(APIView):
 
         return Response(response_data)
 
-    def post(self, request, room_id):
-        """Save Yjs state and content for a room."""
-        content = request.data.get("content", "")
-        yjs_state_b64 = request.data.get("yjs_state")
-
-        from .services.yjs import decode_yjs_state
-
-        yjs_state_bytes = None
-        if yjs_state_b64:
-            try:
-                yjs_state_bytes = decode_yjs_state(yjs_state_b64)
-            except Exception as e:
-                logger.error("Failed to decode Yjs state: %s", e)
-                return Response(
-                    {"error": "Invalid Yjs state encoding"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        room = tarantool_client.update_room_content(room_id, content=content, yjs_state=yjs_state_bytes)
-        if not room:
-            return Response({"error": "Room not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        room_state_cache.warm_room_state(room_id, yjs_state_bytes, content)
-        return Response({"status": "saved", "updated_at": room["updated_at"]})
-
 
 # ============================================================
 # Centrifugo RPC proxy
@@ -172,19 +156,13 @@ class RoomStateView(APIView):
 
 
 def _get_room_snapshot(room_id: int):
-    """Get current room state from Redis first, then fall back to Tarantool."""
+    """Get room metadata from Tarantool and current state from Redis/S3."""
     room = tarantool_client.get_room(room_id)
     if not room:
         return None, None, None
 
-    cached_state, cached_content = room_state_cache.get_room_state(room_id)
-    if cached_state is None and cached_content is None:
-        existing_state = room.get("yjs_state")
-        existing_content = room.get("content") or ""
-        room_state_cache.warm_room_state(room_id, existing_state, existing_content)
-        return room, existing_state, existing_content
-
-    return room, cached_state, cached_content or ""
+    state_bytes, content = _load_state_from_storage(room_id)
+    return room, state_bytes, content
 
 
 @csrf_exempt
@@ -259,14 +237,20 @@ def centrifugo_rpc(request):
         },
     )
 
-    # Persist to DB every 10th request, or every request if Redis is unavailable.
+    # Persist to S3 every 10th request, or every request if Redis is unavailable.
     if cache_update_count is None or cache_update_count % 10 == 0:
-        updated_room = tarantool_client.update_room_content(room_id, content=text_content, yjs_state=new_state_bytes)
-        if not updated_room:
+        try:
+            s3_service.upload_room_state(room_id, new_state_bytes)
+        except Exception as e:
+            logger.error("Failed to flush room %s state to S3: %s", room_id, e)
             return JsonResponse({"error": "Failed to save state"}, status=500)
 
+        updated_room = tarantool_client.touch_room(room_id)
+        if not updated_room:
+            return JsonResponse({"error": "Failed to update room metadata"}, status=500)
+
         logger.info(
-            "Flushed room %s from Redis cache to DB on update #%s",
+            "Flushed room %s from Redis cache to S3 on update #%s",
             room_id,
             cache_update_count if cache_update_count is not None else "fallback",
         )
@@ -353,19 +337,26 @@ class RoomUploadUpdateView(APIView):
         updated_at = datetime.now(timezone.utc).isoformat()
 
         if cache_update_count is None or cache_update_count % 10 == 0:
-            updated_room = tarantool_client.update_room_content(
-                room_id, content=text_content, yjs_state=new_state_bytes
-            )
-            if not updated_room:
-                logger.error(f"[upload-update] Failed to update room {room_id}")
+            try:
+                s3_service.upload_room_state(room_id, new_state_bytes)
+            except Exception as e:
+                logger.error("[upload-update] Failed to upload room %s state to S3: %s", room_id, e)
                 return Response(
                     {"error": "Failed to save state"},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
+            updated_room = tarantool_client.touch_room(room_id)
+            if not updated_room:
+                logger.error(f"[upload-update] Failed to update room {room_id}")
+                return Response(
+                    {"error": "Failed to update room metadata"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
             updated_at = updated_room["updated_at"]
             logger.info(
-                "[upload-update] Flushed room %s from Redis cache to DB on update #%s",
+                "[upload-update] Flushed room %s from Redis cache to S3 on update #%s",
                 room_id,
                 cache_update_count if cache_update_count is not None else "fallback",
             )

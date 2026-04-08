@@ -8,9 +8,7 @@ from pathlib import Path
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY", "django-insecure-dev-key-change-in-production-!@#$%^&*()"
-)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-dev-key-change-in-production-!@#$%^&*()")
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
 
@@ -84,11 +82,14 @@ REDIS_ROOM_STATE_TTL_SECONDS = int(
     os.environ.get("REDIS_ROOM_STATE_TTL_SECONDS", "900")  # 15 минут
 )
 
+AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL", "http://minio:9000")
+AWS_S3_ACCESS_KEY = os.environ.get("AWS_S3_ACCESS_KEY", "minioadmin")
+AWS_S3_SECRET_KEY = os.environ.get("AWS_S3_SECRET_KEY", "minioadmin")
+AWS_S3_BUCKET_NAME = os.environ.get("AWS_S3_BUCKET_NAME", "bse")
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"
-    },
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
