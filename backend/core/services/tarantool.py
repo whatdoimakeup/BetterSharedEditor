@@ -20,6 +20,7 @@ ROOMS_SPACE = "rooms"
 
 def _retry_on_connection_error(func):
     """Decorator to retry Tarantool operations once on connection errors."""
+
     def wrapper(self, *args, **kwargs):
         max_retries = 2
         for attempt in range(max_retries):
@@ -38,8 +39,8 @@ def _retry_on_connection_error(func):
                 else:
                     logger.error("Tarantool request failed after %d attempts: %s", max_retries, e)
                     raise
-    return wrapper
 
+    return wrapper
 
 
 class TarantoolClient:
@@ -136,9 +137,7 @@ class TarantoolClient:
         return [self._row_to_dict(row) for row in result.data]
 
     @_retry_on_connection_error
-    def update_room_content(
-        self, room_id: int, content: str, yjs_state: bytes | None = None
-    ) -> dict[str, Any] | None:
+    def update_room_content(self, room_id: int, content: str, yjs_state: bytes | None = None) -> dict[str, Any] | None:
         """Update room content and optionally Yjs state."""
         conn = self._get_connection()
         now = datetime.now(timezone.utc).isoformat()
@@ -180,6 +179,29 @@ class TarantoolClient:
                 room["created_at"],
                 yjs_state,
                 room.get("content") or "",
+                now,
+            ],
+        )
+        return self.get_room(room_id)
+
+    @_retry_on_connection_error
+    def touch_room(self, room_id: int) -> dict[str, Any] | None:
+        """Update only room metadata timestamp without persisting content/state."""
+        conn = self._get_connection()
+        now = datetime.now(timezone.utc).isoformat()
+
+        room = self.get_room(room_id)
+        if not room:
+            return None
+
+        conn.replace(
+            ROOMS_SPACE,
+            [
+                room_id,
+                room["name"],
+                room["created_at"],
+                None,
+                "",
                 now,
             ],
         )

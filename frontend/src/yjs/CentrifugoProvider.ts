@@ -100,8 +100,6 @@ export function createCentrifugoProvider(
     const message = ctx.data as Partial<YjsUpdateMessage>;
 
     if (message.senderId === localClientId) {
-      console.log(message.data, message.senderId, localClientId);
-
       return;
     }
 
