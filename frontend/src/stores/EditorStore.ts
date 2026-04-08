@@ -1,11 +1,18 @@
 /**
- * MobX store for editor state.
+ * MobX store for collaborative editor state.
  *
- * Manages Yjs document, connection status, and user awareness.
+ * Owns the shared Yjs document for the current room and coordinates
+ * provider lifecycle, connection status, and lightweight save indicators.
  */
 
-import { makeAutoObservable } from "mobx";
+import { makeAutoObservable, runInAction } from "mobx";
 import * as Y from "yjs";
+import { getRoomState } from "../api/client";
+import { decode_yjs_state } from "@/yjs/utils";
+import {
+  createCentrifugoProvider,
+  type CentrifugoProvider,
+} from "@/yjs/CentrifugoProvider";
 
 export interface ConnectedUser {
   clientId: string;
@@ -20,31 +27,101 @@ export type ConnectionStatus =
   | "error";
 
 export class EditorStore {
-  // Yjs document
-  yDoc: Y.Doc;
-  yText: Y.Text;
+  roomId: number | null = null;
 
-  // Connection state
+  yDoc: Y.Doc = new Y.Doc();
+  yText: Y.Text = this.yDoc.getText("content");
+
+  provider: CentrifugoProvider | null = null;
+
   connectionStatus: ConnectionStatus = "disconnected";
   connectionError: string | null = null;
+  isInitializing = false;
 
-  // Awareness (presence)
   connectedUsers: Map<number, ConnectedUser> = new Map();
   currentUser: ConnectedUser | null = null;
 
-  // Persistence
   isSaving = false;
   lastSavedAt: string | null = null;
   lastMsgSizeKb: number | null = null;
 
-  // Provider reference (set after initialization)
-  provider: any = null;
+  private initToken = 0;
+  private saveIndicatorTimer: ReturnType<typeof setTimeout> | null = null;
+  private docUpdateHandler:
+    | ((update: Uint8Array, origin: unknown) => void)
+    | null = null;
 
   constructor() {
-    this.yDoc = new Y.Doc();
-    this.yText = this.yDoc.getText("content");
+    makeAutoObservable(this, {}, { autoBind: true });
+    this.attachDocObservers();
+  }
 
-    makeAutoObservable(this);
+  async initializeRoom(roomId: number) {
+    const currentToken = ++this.initToken;
+
+    this.disposeCurrentRoom();
+    runInAction(() => {
+      this.roomId = roomId;
+      this.isInitializing = true;
+      this.connectionStatus = "connecting";
+      this.connectionError = null;
+
+      const localUser = this.createLocalUser();
+      this.currentUser = localUser;
+      this.connectedUsers = new Map([[0, localUser]]);
+    });
+
+    try {
+      try {
+        const state = await getRoomState(roomId);
+        if (this.initToken !== currentToken) return;
+
+        if (state.yjs_state) {
+          Y.applyUpdate(this.yDoc, decode_yjs_state(state.yjs_state), "server");
+        }
+      } catch {
+        // Room may not have persisted state yet.
+      }
+
+      const provider = createCentrifugoProvider(roomId, this.yDoc);
+
+      if (this.initToken !== currentToken) {
+        provider.destroy();
+        return;
+      }
+
+      provider.on("status", (status: ConnectionStatus) => {
+        runInAction(() => {
+          this.connectionStatus = status;
+          if (status !== "error") {
+            this.connectionError = null;
+          }
+        });
+      });
+
+      provider.on("sync", () => {
+        runInAction(() => {
+          this.lastSavedAt = new Date().toISOString();
+        });
+      });
+
+      runInAction(() => {
+        this.provider = provider;
+      });
+    } catch (error: any) {
+      if (this.initToken !== currentToken) return;
+
+      runInAction(() => {
+        this.connectionStatus = "error";
+        this.connectionError = error?.message ?? "Failed to initialize editor";
+      });
+    } finally {
+      if (this.initToken === currentToken) {
+        runInAction(() => {
+          this.isInitializing = false;
+        });
+      }
+    }
   }
 
   setConnectionStatus(status: ConnectionStatus, error: string | null = null) {
@@ -52,7 +129,7 @@ export class EditorStore {
     this.connectionError = error;
   }
 
-  setCurrentUser(user: ConnectedUser) {
+  setCurrentUser(user: ConnectedUser | null) {
     this.currentUser = user;
   }
 
@@ -60,7 +137,7 @@ export class EditorStore {
     this.connectedUsers = new Map(users);
   }
 
-  setProvider(provider: any) {
+  setProvider(provider: CentrifugoProvider | null) {
     this.provider = provider;
   }
 
@@ -68,7 +145,7 @@ export class EditorStore {
     this.isSaving = saving;
   }
 
-  setLastSavedAt(timestamp: string) {
+  setLastSavedAt(timestamp: string | null) {
     this.lastSavedAt = timestamp;
   }
 
@@ -76,23 +153,93 @@ export class EditorStore {
     this.lastMsgSizeKb = kb;
   }
 
-  /**
-   * Get the number of active users in the room.
-   */
   get activeUserCount(): number {
     return this.connectedUsers.size;
   }
 
-  /**
-   * Get list of connected users.
-   */
   get connectedUsersList(): ConnectedUser[] {
     return Array.from(this.connectedUsers.values());
   }
 
-  /**
-   * Generate a random color for user cursors.
-   */
+  private createLocalUser(): ConnectedUser {
+    const clientId = crypto.randomUUID();
+    return {
+      clientId,
+      displayName: EditorStore.generateDisplayName(clientId),
+      color: EditorStore.generateUserColor(),
+    };
+  }
+
+  private attachDocObservers() {
+    this.detachDocObservers();
+
+    this.docUpdateHandler = (update: Uint8Array, origin: unknown) => {
+      if (origin === "centrifugo" || origin === "server") {
+        return;
+      }
+
+      this.lastMsgSizeKb = update.byteLength / 1024;
+      this.isSaving = true;
+
+      if (this.saveIndicatorTimer) {
+        clearTimeout(this.saveIndicatorTimer);
+      }
+
+      this.saveIndicatorTimer = setTimeout(() => {
+        runInAction(() => {
+          this.isSaving = false;
+          this.lastSavedAt = new Date().toISOString();
+        });
+      }, 250);
+    };
+
+    this.yDoc.on("update", this.docUpdateHandler);
+  }
+
+  private detachDocObservers() {
+    if (this.docUpdateHandler) {
+      this.yDoc.off("update", this.docUpdateHandler);
+      this.docUpdateHandler = null;
+    }
+
+    if (this.saveIndicatorTimer) {
+      clearTimeout(this.saveIndicatorTimer);
+      this.saveIndicatorTimer = null;
+    }
+  }
+
+  private disposeCurrentRoom() {
+    if (this.provider) {
+      this.provider.destroy();
+      this.provider = null;
+    }
+
+    this.detachDocObservers();
+    this.yDoc.destroy();
+
+    this.yDoc = new Y.Doc();
+    this.yText = this.yDoc.getText("content");
+    this.attachDocObservers();
+
+    this.connectionStatus = "disconnected";
+    this.connectionError = null;
+    this.connectedUsers = new Map();
+    this.currentUser = null;
+    this.isSaving = false;
+    this.lastSavedAt = null;
+    this.lastMsgSizeKb = null;
+  }
+
+  resetDocument() {
+    this.initToken += 1;
+    this.disposeCurrentRoom();
+  }
+
+  destroy() {
+    this.roomId = null;
+    this.resetDocument();
+  }
+
   static generateUserColor(): string {
     const colors = [
       "#ff6b6b",
@@ -111,9 +258,6 @@ export class EditorStore {
     return colors[Math.floor(Math.random() * colors.length)];
   }
 
-  /**
-   * Generate a display name for an anonymous user.
-   */
   static generateDisplayName(clientId: string): string {
     const adjectives = [
       "Swift",
@@ -130,33 +274,5 @@ export class EditorStore {
     const suffix = clientId.slice(0, 4).toUpperCase();
     const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
     return `${adj} ${suffix}`;
-  }
-
-  /**
-   * Reset the Yjs document for a new room.
-   */
-  resetDocument() {
-    if (this.provider) {
-      this.provider.destroy();
-      this.provider = null;
-    }
-    this.yDoc.destroy();
-    this.yDoc = new Y.Doc();
-    this.yText = this.yDoc.getText("content");
-    this.connectedUsers.clear();
-    this.currentUser = null;
-    this.lastSavedAt = null;
-    this.connectionError = null;
-  }
-
-  /**
-   * Cleanup resources.
-   */
-  destroy() {
-    if (this.provider) {
-      this.provider.destroy();
-      this.provider = null;
-    }
-    this.yDoc.destroy();
   }
 }

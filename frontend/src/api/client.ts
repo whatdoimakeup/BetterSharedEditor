@@ -57,10 +57,18 @@ export async function getRoomState(roomId: number): Promise<RoomState> {
   return response.data;
 }
 
+export async function yjsUpdate(
+  roomId: number,
+  update: string,
+  sender_id: string,
+): Promise<void> {
+  await api.post(`/rooms/${roomId}/yjs_update/`, { update, sender_id });
+}
+
 export async function saveRoomState(
   roomId: number,
   content: string,
-  yjsState: string | null
+  yjsState: string | null,
 ): Promise<{ status: string; updated_at: string }> {
   const response = await api.post(`/rooms/${roomId}/state/`, {
     content,

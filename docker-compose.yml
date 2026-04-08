@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   tarantool:
     image: tarantool/tarantool:2.11
@@ -10,6 +8,12 @@ services:
       - ./tarantool:/opt/tarantool
       - tarantool_data:/var/lib/tarantool
     command: tarantool /opt/tarantool/init.lua
+
+  redis:
+    image: redis:7-alpine
+    container_name: bse-redis
+    ports:
+      - "6379:6379"
 
   centrifugo:
     image: centrifugo/centrifugo:v5
@@ -31,17 +35,25 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
+    depends_on:
+      - tarantool
+      - redis
     environment:
       - TARANTOOL_HOST=tarantool
       - TARANTOOL_PORT=3301
       - TARANTOOL_USER=admin
       - TARANTOOL_PASSWORD=password
+      - REDIS_URL=redis://redis:6379/0
       - CENTRIFUGO_API_URL=http://centrifugo:8000
       - CENTRIFUGO_API_KEY=secret-api-key
       - CENTRIFUGO_HMAC_KEY=secret-hmac-key
-    command: >
-      sh -c "python manage.py migrate &&
-             python manage.py runserver 0.0.0.0:8000"
+    # command: >
+    #   sh -c "python manage.py migrate &&
+    #          python manage.py runserver 0.0.0.0:8000"
+    command:
+      - sh
+      - -c
+      - python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 4 --timeout 120 --access-logfile - --error-logfile -
 
 volumes:
   tarantool_data:
