@@ -2,6 +2,7 @@ Django>=5.0,<5.1
 djangorestframework>=3.14,<3.15
 boto3==1.42.85
 gunicorn>=22.0,<23.0
+django-tarantool-reborn>=0.1.0
 tarantool>=0.10.0,<0.11.0
 redis>=5.0,<6.0
 requests>=2.31,<2.32
